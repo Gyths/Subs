@@ -29,6 +29,7 @@ CHUNK_DURATION = 30 # Duracion de cada corte de audio -> 10,20 o 30 -> 30 parece
 CHUNK_SIZE = int(SAMPLERATE*(CHUNK_DURATION/1000)) #Tamaño de cada corte
 BUFFER_TIMEOUT = 10000 #Milisegundos de maxima duracion del buffer
 SILENCE_TIMEOUT = 120 #Milisegundos de silencio para cortar y mandar directamente a whisper
+NEWLINE_TIMEOUT = 1000
 # Usa GPU para acelerar (tiny, base, small, medium, large, turbo)
 print('Cargando el modelo en la GPU...')
 model = whisper.load_model("turbo").to("cuda")
@@ -50,13 +51,14 @@ def grabar_audio_VAD():
             audio_chunk,_ = stream.read(CHUNK_SIZE)
             audio_data = np.frombuffer(audio_chunk, dtype= np.int16)
             is_speech = vad.is_speech(audio_data.tobytes(),sample_rate= SAMPLERATE)
-
+            
+            #Si es dialogo y el buffer no ha llegado a su maxima capacidad (en este caso 10 segundos)
             if (is_speech and (len(speech_buffer)<=(BUFFER_TIMEOUT/CHUNK_DURATION))):
                 speech_buffer.append(audio_data)
                 last_speech = time.time()
-            else:
-                #Si longitud llega a 2 segundos o existe algo en el buffer y hay silencio por 1 segundo
+            else:                
                 last_speech_time = (time.time() - last_speech) * 1000
+                #Si existe algo en el buffer y hay silencio por 120ms
                 if((len(speech_buffer)>1) and last_speech_time>SILENCE_TIMEOUT):
                     audio_data = np.concatenate(speech_buffer)
                     with wave.open(AUDIO_ARCHIVO, "wb") as wf:
@@ -64,9 +66,12 @@ def grabar_audio_VAD():
                         wf.setsampwidth(2)
                         wf.setframerate(SAMPLERATE)
                         wf.writeframes(audio_data.tobytes())
-                    
+
                     transcribir_audio()
                     speech_buffer=[]
+                
+                if(last_speech_time>NEWLINE_TIMEOUT):
+                        stream_newline()
             
             #Actualizacion de pantalla y cierre con teclado
             keyboard.add_hotkey("shift+`", lambda: os._exit(0))  # Cerrar con 'Shift + ~'``
@@ -80,6 +85,16 @@ def grabar_audio_VAD():
     stream.stop()
     stream.close()
 
+def stream_newline():
+    if transcription_en.get("end-2c") != '\n':
+        transcription_en.config(state='normal')
+        transcription_en.insert('end','\n\n')
+        transcription_en.config(state='disabled')
+    if transcription_es.get("end-2c") != '\n':
+        transcription_es.config(state='normal')
+        transcription_es.insert('end','\n\n')
+        transcription_es.config(state='disabled')
+
 # 📜 Función para transcribir el audio con Whisper local
 def transcribir_audio():
     #print("🔄 Transcribiendo...")
@@ -88,11 +103,13 @@ def transcribir_audio():
     if(result["language"]=='en'):
         transcription_en.config(state='normal')
         transcription_en.insert(tk.END,result["text"]+" ")
+        transcription_en.see('end')
         transcription_en.config(state='disabled')
         print(Fore.BLUE + result["text"], end= ' ')
     elif(result["language"]=='es'):
         transcription_es.config(state='normal')
         transcription_es.insert(tk.END,result["text"]+" ")
+        transcription_es.see('end')
         transcription_es.config(state='normal')
         print(Fore.GREEN + result["text"], end= ' ')
     else:
@@ -101,6 +118,16 @@ def transcribir_audio():
 
 def end_transcription():
     os._exit(0)
+
+def clearEN():
+        transcription_en.config(state='normal')
+        transcription_en.delete('1.0','end')
+        transcription_en.config(state='disabled')
+
+def clearES():
+        transcription_es.config(state='normal')
+        transcription_es.delete('1.0','end')
+        transcription_es.config(state='disabled')
 
 #SIMPLE GUI SETUP
 #Window
@@ -117,6 +144,12 @@ button.pack()
 
 end_button = tk.Button(root,text="Sicarear", command=end_transcription)
 end_button.pack(side=tk.BOTTOM,pady=120)
+
+clear_button_en= tk.Button(root,text="Clear EN",command=clearEN)
+clear_button_en.pack(side=tk.BOTTOM)
+
+clear_button_es= tk.Button(root,text="Clear ES",command=clearES)
+clear_button_es.pack(side=tk.BOTTOM,pady=10)
 
 #Frame que contiene todos los elementos graficos
 main_frame = tk.Frame(root)
