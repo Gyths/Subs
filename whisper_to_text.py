@@ -4,16 +4,16 @@ import sounddevice as sd
 import numpy as np
 import wave
 import os
+import threading
 
 from colorama import Fore,init
 import webrtcvad
 import time
 import tkinter as tk
-# ADD VEC2VEC VAD for voice detection
-    #DONE , test silero version later
-# GUI with lang detection
+from transformers import pipeline
 
-#CMD Color test
+
+#CMD test
 init(autoreset=True)
 
 AUDIO_ARCHIVO = "temp_audio.wav"
@@ -21,7 +21,7 @@ AUDIO_ARCHIVO = "temp_audio.wav"
 # 🔹 Configuración del micrófono
 SAMPLERATE = 48000  # Frecuencia de muestreo, 16k es lo unico compatible con webrtcvad
 CHANNELS = 1  # Mono
-DEVICE = 2 # 1 = dispositivo por defecto del sistema
+DEVICE = 2 # 1 = dispositivo por defecto del sistema, 2 cable de audio virtual
 
 # Configuracion del detector de actividad de voz (VAD)
 vad = webrtcvad.Vad(3) #1,2,3 va subiendo la sensibilidad al silencio, 3 es max
@@ -30,36 +30,35 @@ CHUNK_SIZE = int(SAMPLERATE*(CHUNK_DURATION/1000)) #Tamaño de cada corte
 BUFFER_TIMEOUT = 10000 #Milisegundos de maxima duracion del buffer
 SILENCE_TIMEOUT = 120 #Milisegundos de silencio para cortar y mandar directamente a whisper
 NEWLINE_TIMEOUT = 1000
-# Usa GPU para acelerar (tiny, base, small, medium, large, turbo)
+# Carga de modelo a la gpu, Turbo es el mejor para bidireccionalidad en idioma por ahora
 print('Cargando el modelo en la GPU...')
 model = whisper.load_model("turbo").to("cuda")
 
+# Modelo basico de traduccion texto a texto (Pruebas)
+translator_en_es = pipeline("translation", model="Helsinki-NLP/opus-mt-en-es")
+translator_es_en = pipeline("translation", model="Helsinki-NLP/opus-mt-es-en")
 
-# 🎙️ Función para grabar audio por deteccion de actividad de voz
+
 def grabar_audio_VAD():
-
-    #Inicializacion de microfono y buffer de audio
-    stream = sd.InputStream(samplerate=SAMPLERATE, channels=CHANNELS, dtype= np.int16, blocksize= CHUNK_SIZE,device= DEVICE)
+    stream = sd.InputStream(samplerate=SAMPLERATE, channels=CHANNELS, dtype=np.int16,
+                            blocksize=CHUNK_SIZE, device=DEVICE)
     stream.start()
-    speech_buffer= []
+    speech_buffer = []
     print("Escuchando....")
-    print("Presiona 'Shift + `' para salir")
-    
     last_speech = time.time()
-    try:
-        while True:
-            audio_chunk,_ = stream.read(CHUNK_SIZE)
-            audio_data = np.frombuffer(audio_chunk, dtype= np.int16)
-            is_speech = vad.is_speech(audio_data.tobytes(),sample_rate= SAMPLERATE)
-            
-            #Si es dialogo y el buffer no ha llegado a su maxima capacidad (en este caso 10 segundos)
-            if (is_speech and (len(speech_buffer)<=(BUFFER_TIMEOUT/CHUNK_DURATION))):
+
+    while True:
+        try:
+            audio_chunk, _ = stream.read(CHUNK_SIZE)
+            audio_data = np.frombuffer(audio_chunk, dtype=np.int16)
+            is_speech = vad.is_speech(audio_data.tobytes(), sample_rate=SAMPLERATE)
+
+            if is_speech and (len(speech_buffer) <= (BUFFER_TIMEOUT / CHUNK_DURATION)):
                 speech_buffer.append(audio_data)
                 last_speech = time.time()
-            else:                
+            else:
                 last_speech_time = (time.time() - last_speech) * 1000
-                #Si existe algo en el buffer y hay silencio por 120ms
-                if((len(speech_buffer)>1) and last_speech_time>SILENCE_TIMEOUT):
+                if (len(speech_buffer) > 1) and (last_speech_time > SILENCE_TIMEOUT):
                     audio_data = np.concatenate(speech_buffer)
                     with wave.open(AUDIO_ARCHIVO, "wb") as wf:
                         wf.setnchannels(CHANNELS)
@@ -67,23 +66,25 @@ def grabar_audio_VAD():
                         wf.setframerate(SAMPLERATE)
                         wf.writeframes(audio_data.tobytes())
 
-                    transcribir_audio()
-                    speech_buffer=[]
-                
-                if(last_speech_time>NEWLINE_TIMEOUT):
-                        stream_newline()
-            
-            #Actualizacion de pantalla y cierre con teclado
-            keyboard.add_hotkey("shift+`", lambda: os._exit(0))  # Cerrar con 'Shift + ~'``
+                    try:
+                        transcribir_audio()
+                    except Exception as e:
+                        print("[DEBUG]: Transcription error:", e)
+                    speech_buffer = []
+
+                if last_speech_time > NEWLINE_TIMEOUT:
+                    stream_newline()
+
+            # Actualiza GUI 
             scrollbar_en.config(command=transcription_en.yview)
             scrollbar_es.config(command=transcription_es.yview)
             root.update()
 
-    except Exception as e:
-        print("Error al detectar audio")
-    
-    stream.stop()
-    stream.close()
+        except Exception as e:
+            # Saltar el segmento y seguir grabando
+            print("[DEBUG]: Audio capture error:", e)
+            continue
+
 
 def stream_newline():
     if transcription_en.get("end-2c") != '\n':
@@ -95,26 +96,67 @@ def stream_newline():
         transcription_es.insert('end','\n\n')
         transcription_es.config(state='disabled')
 
-# 📜 Función para transcribir el audio con Whisper local
+# Transcribe el audio con whisper local
 def transcribir_audio():
-    #print("🔄 Transcribiendo...")
-    result = model.transcribe(AUDIO_ARCHIVO)
-    #print("📝 Transcripción: (", result["language"],") ", result["text"], end= ' ')
-    if(result["language"]=='en'):
+    try:
+        result = model.transcribe(AUDIO_ARCHIVO, temperature=0, no_speech_threshold=0.6)
+    except Exception as e:
+        print("[DEBUG]: Transcription failed:", e)
+        return
+    noise_flag = False
+    print(result.values())
+    #Intento de reducir la cantidad de ruido de fondo clasificado como segmento, se requiere cierto grado de confianza para mostrar
+    for segment in result["segments"]:
+        if segment["avg_logprob"]< -0.85:
+            noise_flag = True
+        elif segment["end"] >= 29.98:
+            noise_flag = True
+            
+
+    if noise_flag == False:
+        text = result["text"]
+
+    if result["language"] == "en":
+        # Original EN
         transcription_en.config(state='normal')
-        transcription_en.insert(tk.END,result["text"]+" ")
+        transcription_en.insert(tk.END, text + " ")
         transcription_en.see('end')
         transcription_en.config(state='disabled')
-        print(Fore.BLUE + result["text"], end= ' ')
-    elif(result["language"]=='es'):
-        transcription_es.config(state='normal')
-        transcription_es.insert(tk.END,result["text"]+" ")
-        transcription_es.see('end')
-        transcription_es.config(state='normal')
-        print(Fore.GREEN + result["text"], end= ' ')
-    else:
-        print(result["text"], end= ' ')
 
+        # Traduccion ES
+        translated = translator_en_es(text)[0]["translation_text"]
+
+        transcription_es.config(state='normal')
+        transcription_es.insert(tk.END, translated + " ")
+        transcription_es.see('end')
+        transcription_es.config(state='disabled')
+
+        print(Fore.BLUE + text, end=' ')
+
+    elif result["language"] == "es":
+        # Original ES
+        transcription_es.config(state='normal')
+        transcription_es.insert(tk.END, text + " ")
+        transcription_es.see('end')
+        transcription_es.config(state='disabled')
+
+        # Traduccion EN
+        translated = translator_es_en(text)[0]["translation_text"]
+
+        transcription_en.config(state='normal')
+        transcription_en.insert(tk.END, translated + " ")
+        transcription_en.see('end')
+        transcription_en.config(state='disabled')
+
+        print(Fore.GREEN + text, end=' ')
+
+    else:
+        print(text, end=' ')
+
+def start_vad_thread():
+    # Inicia un daemon_thread para detectar audio continuamente
+    vad_thread = threading.Thread(target=grabar_audio_VAD, daemon=True)
+    vad_thread.start()
 
 def end_transcription():
     os._exit(0)
@@ -129,20 +171,20 @@ def clearES():
         transcription_es.delete('1.0','end')
         transcription_es.config(state='disabled')
 
-#SIMPLE GUI SETUP
-#Window
+#GUI
+#Window (resolucion fija, arreglar)
 root = tk.Tk()
-root.title("Gemas gratis de dragon city")
+root.title("Call Log")
 root.geometry("500x1200")
 
-label = tk.Label(root,text="Cada dia menos chamba.com (no hay boton de acabar soy permanente)", font =("Helvetica",12))
+label = tk.Label(root,text="Transcipcion de audio en vivo", font =("Helvetica",12))
 label.pack(pady=20)
 
 #Botones de inicio y fin
-button = tk.Button(root,text="Empezar", command=grabar_audio_VAD)
+button = tk.Button(root,text="Start", command=start_vad_thread)
 button.pack()
 
-end_button = tk.Button(root,text="Sicarear", command=end_transcription)
+end_button = tk.Button(root,text="Quit", command=end_transcription)
 end_button.pack(side=tk.BOTTOM,pady=120)
 
 clear_button_en= tk.Button(root,text="Clear EN",command=clearEN)
@@ -151,24 +193,24 @@ clear_button_en.pack(side=tk.BOTTOM)
 clear_button_es= tk.Button(root,text="Clear ES",command=clearES)
 clear_button_es.pack(side=tk.BOTTOM,pady=10)
 
-#Frame que contiene todos los elementos graficos
+#Frame
 main_frame = tk.Frame(root)
 main_frame.pack(pady=20)
 
-#Configuracion para cuadro de texto en ingles
-en_frame = tk.LabelFrame(main_frame,text="El que te cobra 10k por mirarte a los ojos",padx=10,pady=10) #Frame que contiene los dos elementos cuadro de texto y barra
+#Cuadro de texto en ingles
+en_frame = tk.LabelFrame(main_frame,text="Texto en Ingles",padx=10,pady=10)
 en_frame.pack(side=tk.TOP,pady=10)
 
 scrollbar_en = tk.Scrollbar(en_frame) #barra deslizable
 scrollbar_en.pack(side=tk.RIGHT, fill=tk.Y)
 
-transcription_en = tk.Text(en_frame,wrap=tk.WORD,yscrollcommand=scrollbar_en.set,height=20,width=60,fg="#FFA500",state="disabled")# Cuadro de texto, solo lectura
+transcription_en = tk.Text(en_frame,wrap=tk.WORD,yscrollcommand=scrollbar_en.set,height=20,width=60,fg="#FFA500",state="disabled")# Solo lectura
 transcription_en.pack(pady=20)
 
-scrollbar_en.config(command=transcription_en.yview) #Funcionalidad de la barra / sin esto solo es un png que cuelga la ventana
+scrollbar_en.config(command=transcription_en.yview)
 
-#Configuracion cuadro de texto para español
-es_frame = tk.LabelFrame(main_frame,text="Conchudo sin estudios",padx=10,pady=10)#Frame que contiene los dos elementos cuadro de texto y barra
+#Cuadro de texto para español
+es_frame = tk.LabelFrame(main_frame,text="Texto en español",padx=10,pady=10)
 es_frame.pack(side=tk.TOP,pady=10)
 
 scrollbar_es = tk.Scrollbar(es_frame) #barra deslizable
@@ -177,8 +219,12 @@ scrollbar_es.pack(side=tk.RIGHT, fill=tk.Y)
 transcription_es = tk.Text(es_frame,wrap=tk.WORD,yscrollcommand=scrollbar_es.set,height=20,width=60,fg="#008000",state='disabled')# Cuadro de texto, solo lectura
 transcription_es.pack(pady=20)
 
-scrollbar_es.config(command=transcription_es.yview) #Funcionalidad de la barra / sin esto solo es un png que cuelga la ventana
+scrollbar_es.config(command=transcription_es.yview)
 
-#Inicializa pantalla la 1ra vez
+
+#PARA TRANSCRIBIR ARCHIVOS DE AUDIO Y NO EN VIVO DESCOMENTAR Y CAMBIAR EL NOMBRE DE ARCHIVO
+#transcribir_audio()
+
 root.mainloop()
+
 
