@@ -18,9 +18,19 @@ helsinki ML -> Translates into target language<br/>
 
 ## Setup
 1. Clone the repo and install dependencies
-2. Configure your mic in whisper_to_text.py parameters
+2. Dependencies:
+   - openai-whisper
+   - keyboard
+   - sounddevice
+   - numpy
+   - colorama (only for console testing)
+   - webrtcvad
+   - transformers
+   - torch
+     
+4. Configure your mic in whisper_to_text.py parameters
 `DEVICE=your mic number`
-3. Run the bot
+5. Run the bot
 
 ## Usage
 Press start to start listening<br/>
