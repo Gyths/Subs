@@ -2,7 +2,7 @@
 Local live audio translation/transcription tool for Eng<->Spa powered by whisper and helsinki-NLP<br/>
 
 ## Demo
-<img width="496" height="1225" alt="image" src="https://github.com/user-attachments/assets/ca345499-9cab-4368-941d-7bdc0536111f" />
+<img width="398" height="852" alt="image" src="https://github.com/user-attachments/assets/1240d377-b55a-403a-b0a1-ae6a54d129a7" />
 
 ## Features
 - Bidirectional - Transcribes and translates both languages simultaneously
